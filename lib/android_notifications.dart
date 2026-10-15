@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
@@ -8,6 +9,14 @@ class AndroidNotifications {
       FlutterLocalNotificationsPlugin();
   Future<void>? _initialization;
   Future<void> _pendingOperation = Future<void>.value();
+  String? lastError;
+
+  void _recordError(Object error) {
+    lastError = error is PlatformException
+        ? '${error.code}: ${error.message ?? 'Ошибка Android'}'
+        : error.toString();
+    debugPrint('Android notifications: $lastError');
+  }
 
   Future<T> _inOrder<T>(Future<T> Function() operation) {
     final result = _pendingOperation.then((_) => operation());
@@ -18,16 +27,28 @@ class AndroidNotifications {
   bool get supported =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
-  Future<void> initialize() => _initialization ??= _initialize();
+  Future<void> initialize() => _initialization ??= _initialize().catchError((
+    Object error,
+    StackTrace stack,
+  ) {
+    // Не кэшируем неудачу навсегда: следующая попытка может быть успешной.
+    _initialization = null;
+    Error.throwWithStackTrace(error, stack);
+  });
 
   Future<void> _initialize() async {
     if (!supported) return;
     tz_data.initializeTimeZones();
-    await _plugin.initialize(
+    final initialized = await _plugin.initialize(
       settings: const InitializationSettings(
         android: AndroidInitializationSettings('ic_notification'),
       ),
     );
+    if (initialized != true) {
+      throw StateError(
+        'Не удалось инициализировать плагин уведомлений Android',
+      );
+    }
   }
 
   AndroidFlutterLocalNotificationsPlugin get _android => _plugin
@@ -48,6 +69,7 @@ class AndroidNotifications {
 
   Future<String> requestPermissions() async {
     if (!supported) return 'unsupported';
+    lastError = null;
     try {
       await initialize();
       final allowed = await _android.requestNotificationsPermission() ?? false;
@@ -64,7 +86,8 @@ class AndroidNotifications {
       return await _android.canScheduleExactNotifications() == true
           ? 'granted'
           : 'inexact';
-    } catch (_) {
+    } catch (error) {
+      _recordError(error);
       return 'error';
     }
   }
@@ -75,6 +98,7 @@ class AndroidNotifications {
 
   Future<String> _schedule(int id, String title, DateTime endsAt) async {
     if (!supported) return 'unsupported';
+    lastError = null;
     try {
       await initialize();
       if (await _android.areNotificationsEnabled() != true) return 'denied';
@@ -99,7 +123,8 @@ class AndroidNotifications {
             : AndroidScheduleMode.inexactAllowWhileIdle,
       );
       return exact ? 'scheduled' : 'inexact';
-    } catch (_) {
+    } catch (error) {
+      _recordError(error);
       return 'error';
     }
   }

@@ -10,22 +10,79 @@ void main() {
   final calls = <MethodCall>[];
   var exact = true;
   var allowed = true;
+  var initializationFails = false;
+  var schedulingFails = false;
   setUp(() {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     AndroidFlutterLocalNotificationsPlugin.registerWith();
     calls.clear();
     exact = true;
     allowed = true;
+    initializationFails = false;
+    schedulingFails = false;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
           calls.add(call);
+          if (call.method == 'initialize' && initializationFails) {
+            throw PlatformException(
+              code: 'invalid_icon',
+              message: 'Missing ic_notification',
+            );
+          }
+          if (call.method == 'zonedSchedule' && schedulingFails) {
+            throw PlatformException(
+              code: 'schedule_failed',
+              message: 'Android rejected alarm',
+            );
+          }
           return switch (call.method) {
             'initialize' => true,
             'areNotificationsEnabled' => allowed,
             'canScheduleExactNotifications' => exact,
+            'requestNotificationsPermission' => allowed,
             _ => null,
           };
         });
+  });
+
+  test(
+    'Ошибка инициализации сохраняется и допускает повторную попытку',
+    () async {
+      final service = AndroidNotifications();
+      initializationFails = true;
+      expect(await service.requestPermissions(), 'error');
+      expect(service.lastError, contains('invalid_icon'));
+      expect(service.lastError, contains('Missing ic_notification'));
+      initializationFails = false;
+      expect(await service.requestPermissions(), 'granted');
+      expect(service.lastError, isNull);
+      expect(calls.where((call) => call.method == 'initialize'), hasLength(2));
+      expect(calls.where((call) => call.method == 'show'), hasLength(1));
+    },
+  );
+
+  test('Ошибка планирования содержит код и сообщение Android', () async {
+    schedulingFails = true;
+    final service = AndroidNotifications();
+    expect(
+      await service.schedule(
+        1,
+        'Задача',
+        DateTime.now().add(const Duration(minutes: 1)),
+      ),
+      'error',
+    );
+    expect(service.lastError, 'schedule_failed: Android rejected alarm');
+    schedulingFails = false;
+    expect(
+      await service.schedule(
+        1,
+        'Задача',
+        DateTime.now().add(const Duration(minutes: 1)),
+      ),
+      'scheduled',
+    );
+    expect(service.lastError, isNull);
   });
   tearDown(() {
     debugDefaultTargetPlatformOverride = null;

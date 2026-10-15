@@ -31,6 +31,7 @@ class _TaskScreenState extends State<TaskScreen>
   final TaskStorage storage = TaskStorage();
   final AndroidNotifications androidNotifications = AndroidNotifications();
   bool isLoading = true;
+  bool isEnablingNotifications = false;
   String? loadError;
   int nextTaskId = 1;
   @override
@@ -49,8 +50,9 @@ class _TaskScreenState extends State<TaskScreen>
 
   void showMessage(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> loadTasks() async {
@@ -86,7 +88,7 @@ class _TaskScreenState extends State<TaskScreen>
       // Планирование в Android выполняется независимо от UI-таймера.
       for (final task in tasks.toList()) {
         if (task.isRunning && androidNotifications.supported) {
-          await scheduleNotification(task);
+          if (!await scheduleNotification(task)) break;
         }
       }
     } catch (_) {
@@ -107,9 +109,9 @@ class _TaskScreenState extends State<TaskScreen>
     }
   }
 
-  Future<void> scheduleNotification(Task task) async {
+  Future<bool> scheduleNotification(Task task) async {
     final endsAt = task.endsAt;
-    if (endsAt == null) return;
+    if (endsAt == null) return true;
     final result = await androidNotifications.schedule(
       task.id,
       task.title,
@@ -119,13 +121,19 @@ class _TaskScreenState extends State<TaskScreen>
       showMessage(
         'Для уведомлений Android нажмите колокольчик и разрешите уведомления',
       );
+      return false;
     } else if (result == 'inexact') {
       showMessage(
         'Уведомление запланировано. Для точного времени разрешите будильники через колокольчик',
       );
     } else if (result == 'error') {
-      showMessage('Не удалось запланировать уведомление Android');
+      showMessage(
+        'Не удалось запланировать уведомление Android: '
+        '${androidNotifications.lastError ?? 'неизвестная ошибка'}',
+      );
+      return false;
     }
+    return true;
   }
 
   @override
@@ -138,18 +146,31 @@ class _TaskScreenState extends State<TaskScreen>
   }
 
   Future<void> enableNotifications() async {
+    if (isEnablingNotifications) return;
+    setState(() => isEnablingNotifications = true);
+    try {
+      await _enableNotifications();
+    } finally {
+      if (mounted) setState(() => isEnablingNotifications = false);
+    }
+  }
+
+  Future<void> _enableNotifications() async {
     if (androidNotifications.supported) {
       final result = await androidNotifications.requestPermissions();
+      if (!mounted) return;
       showMessage(switch (result) {
         'granted' =>
           'Уведомления и точные таймеры разрешены. Пробное уведомление создано',
         'inexact' => 'Уведомления разрешены, но без точных будильников они могут запаздывать',
         'denied' => 'Разрешите уведомления в настройках приложения Android',
-        _ => 'Не удалось включить уведомления Android',
+        _ =>
+          'Не удалось включить уведомления Android: '
+              '${androidNotifications.lastError ?? 'неизвестная ошибка'}',
       });
-      if (!mounted) return;
+      if (result != 'granted' && result != 'inexact') return;
       for (final task in tasks.toList()) {
-        if (task.isRunning) await scheduleNotification(task);
+        if (task.isRunning && !await scheduleNotification(task)) break;
       }
       return;
     }
@@ -227,7 +248,7 @@ class _TaskScreenState extends State<TaskScreen>
         startTimer(task);
         final notification = androidNotifications.supported
             ? scheduleNotification(task)
-            : Future<void>.value();
+            : Future<bool>.value(true);
         await saveTasks();
         await notification;
       }
@@ -325,7 +346,8 @@ class _TaskScreenState extends State<TaskScreen>
             IconButton(
               tooltip: 'Разрешить и проверить уведомления',
               icon: const Icon(Icons.notifications_outlined),
-              onPressed: isLoading || loadError != null
+              onPressed:
+                  isLoading || loadError != null || isEnablingNotifications
                   ? null
                   : enableNotifications,
             ),
